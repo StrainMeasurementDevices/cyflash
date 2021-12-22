@@ -1,3 +1,3 @@
-from . import bootload
+import cli
 
-bootload.main()
+cli.main()

@@ -1,9 +1,10 @@
-import codecs
-import six
+import logging
+import typing
 from builtins import super
 from builtins import range
 import struct
 import time
+from cyacd import ChecksumType
 
 
 class InvalidPacketError(Exception):
@@ -18,7 +19,6 @@ class BootloaderTimeoutError(BootloaderError):
     pass
 
 
-# TODO: Implement Security key functionality
 class BootloaderKeyError(BootloaderError):
     STATUS = 0x01
 
@@ -368,87 +368,22 @@ class GetPSOC5MetadataCommand(BootloaderCommand):
     RESPONSE = GetPSOC5MetadataResponse
 
 
-class BootloaderSession(object):
-    """
-      The main bootloader session object
-    """
-
-    def __init__(self, transport, checksum_func):
-        self.transport = transport
-        self.checksum_func = checksum_func
-
-    def send(self, command, read=True):
-        """
-            Internal function that structures the data to be sent over the transport
-        """
-        data = command.data
-        packet = b"\x01" + struct.pack("<BH", command.COMMAND, len(data)) + data
-        packet = packet + struct.pack('<H', self.checksum_func(packet)) + b"\x17"
-        self.transport.send(packet)
-        if read:
-            response = self.transport.recv()
-            return command.RESPONSE.decode(response, self.checksum_func)
-        else:
-            return None
-
-    def enter_bootloader(self, key: list = None):
-        """
-            Enters the bootloader
-
-            Args:
-                key (int, optional): The secret key for the bootloader, as a list of 6 hex codes.
-
-            Returns:
-                A tuple of:
-                  - The silicon ID
-                  - The silicon rev
-                  - The bootloader rev
-        """
-        response = self.send(EnterBootloaderCommand(key))
-        return response.silicon_id, response.silicon_rev, response.bl_version | (response.bl_version_2 << 16)
-
-    def application_status(self, application_id):
-        response = self.send(GetAppStatusCommand(application_id=application_id))
-        return response.app_valid, response.app_active
-
-    def exit_bootloader(self):
-        self.send(ExitBootloaderCommand(), read=False)
-
-    def get_flash_size(self, array_id):
-        response = self.send(GetFlashSizeCommand(array_id=array_id))
-        return response.first_row, response.last_row
-
-    def verify_checksum(self):
-        return bool(self.send(VerifyChecksumCommand()).status)
-
-    def get_metadata(self, application_id=0):
-        return self.send(GetMetadataCommand(application_id=application_id))
-
-    def get_psoc5_metadata(self, application_id=0):
-        return self.send(GetPSOC5MetadataCommand(application_id=application_id))
-
-    def program_row(self, array_id, row_id, rowdata, chunk_size):
-        chunked = [rowdata[i:i + chunk_size] for i in range(0, len(rowdata), chunk_size)]
-        for chunk in chunked[0:-1]:
-            self.send(SendDataCommand(chunk))
-        self.send(ProgramRowCommand(chunked[-1], array_id=array_id, row_id=row_id))
-
-    def get_row_checksum(self, array_id, row_id):
-        return self.send(VerifyRowCommand(array_id=array_id, row_id=row_id)).checksum
-
-    def set_application_active(self, application_id):
-        self.send(SetAppActive(application_id=application_id))
-
-
 class SerialTransport(object):
-    def __init__(self, f, verbose):
+    """
+        A serial transport
+    """
+    def __init__(self, f):
+        """
+            Args:
+                f: The serial object. This class can be a pySerial's Serial object, or any class
+                   with the functions `write` and `read`
+        """
         self.f = f
-        self._verbose = verbose
+        self._log = logging.getLogger('cyflash-serial-transport')
 
     def send(self, data):
-        if self._verbose:
-            for part in bytearray(data):
-                print("s: 0x{:02x}".format(part))
+        for part in bytearray(data):
+            self._log.debug("Sent out: 0x{:02x}".format(part))
         self.f.write(data)
 
     def recv(self):
@@ -457,9 +392,8 @@ class SerialTransport(object):
             raise BootloaderTimeoutError("Timed out waiting for Bootloader response.")
         size = struct.unpack("<H", data[-2:])[0]
         data += self.f.read(size + 3)
-        if self._verbose:
-            for part in bytearray(data):
-                print("r: 0x{:02x}".format(part))
+        for part in bytearray(data):
+            self._log.debug("Read: 0x{:02x}".format(part))
         if len(data) < size + 7:
             raise BootloaderTimeoutError("Timed out waiting for Bootloader response.")
         return data
@@ -499,7 +433,7 @@ class CANbusTransport(object):
             while (self.transport.recv(timeout=0)):
                 pass
 
-            self.transport.send(msg)
+            self.transport._send(msg)
             self._last_sent_frame = msg
             if (self.echo_frames):
                 # Read back the echo message
@@ -530,7 +464,7 @@ class CANbusTransport(object):
         # Read first frame, contains data length
         while True:
             frame = self.transport.recv(self.timeout)
-            if (not frame):
+            if not frame:
                 raise BootloaderTimeoutError("Timed out waiting for Bootloader 1st response frame")
 
             if frame.arbitration_id != self.frame_id:
@@ -541,7 +475,7 @@ class CANbusTransport(object):
             if len(frame.data) < 4:
                 raise BootloaderTimeoutError("Unexpected response data: length {}, minimum is 4".format(len(frame.data)))
 
-            if (frame.data[0] != 0x01):
+            if frame.data[0] != 0x01:
                 raise BootloaderTimeoutError("Unexpected start of frame data: 0x{0:02X}, expected 0x01".format(frame.data[0]))
 
             break
@@ -550,12 +484,12 @@ class CANbusTransport(object):
 
         # 4 initial bytes, reported size, 3 tail
         total_size = 4 + (struct.unpack("<H", data[2:4])[0]) + 3
-        while (len(data) < total_size):
+        while len(data) < total_size:
             frame = self.transport.recv(self.timeout)
-            if (not frame):
+            if not frame:
                 raise BootloaderTimeoutError("Timed out waiting for Bootloader response frame")
 
-            if (self.echo_frames) and (frame.arbitration_id != self.frame_id):
+            if self.echo_frames and (frame.arbitration_id != self.frame_id):
                 # Got a frame from another device, ignore
                 continue
 
@@ -564,25 +498,112 @@ class CANbusTransport(object):
         return data
 
 
-def crc16_checksum(data):
-    crc = 0xffff
+class BootloaderSession(object):
+    """
+      The bootloader session object
+    """
 
-    for b in data:
-        if not isinstance(b, int):
-            b = ord(b)
-        for i in range(8):
-            if (crc & 1) ^ (b & 1):
-                crc = (crc >> 1) ^ 0x8408
-            else:
-                crc >>= 1
-            b >>= 1
+    def __init__(self, transport: typing.Union[SerialTransport, CANbusTransport], checksum_type: ChecksumType):
+        """
+            Args:
+                transport: The transport to send the data over. Right now only SerialTransport and CANbusTransport are
+                           supported
+                checksum_type: The checksum type read from the firmware file (see :class:`cyacd.BootloaderData` for more
+                               details
+        """
+        self.transport = transport
+        if checksum_type == ChecksumType.crc16:
+            self.checksum_func = self.crc16_checksum
+        elif checksum_type == ChecksumType.sum_2complement:
+            self.checksum_func = self.sum_2complement_checksum
+        else:
+            raise UserWarning("Invalid checksum type")
 
-    crc = (crc << 8) | (crc >> 8)
-    return ~crc & 0xffff
+    def enter_bootloader(self, key: list = None):
+        """
+            Enters the bootloader
 
+            Args:
+                key (int, optional): The secret key for the bootloader, as a list of 6 hex codes.
 
-def sum_2complement_checksum(data):
-    if (type(data) is str):
-        return (1 + ~sum([ord(c) for c in data])) & 0xFFFF
-    elif (type(data) in (bytearray, bytes)):
-        return (1 + ~sum(data)) & 0xFFFF
+            Returns:
+                A tuple of:
+                  - The silicon ID
+                  - The silicon rev
+                  - The bootloader rev
+        """
+        response = self._send(EnterBootloaderCommand(key))
+        return response.silicon_id, response.silicon_rev, response.bl_version | (response.bl_version_2 << 16)
+
+    def application_status(self, application_id):
+        response = self._send(GetAppStatusCommand(application_id=application_id))
+        return response.app_valid, response.app_active
+
+    def exit_bootloader(self):
+        """
+            Exits the bootloader
+        """
+        self._send(ExitBootloaderCommand(), read=False)
+
+    def get_flash_size(self, array_id):
+        response = self._send(GetFlashSizeCommand(array_id=array_id))
+        return response.first_row, response.last_row
+
+    def verify_checksum(self):
+        return bool(self._send(VerifyChecksumCommand()).status)
+
+    def get_metadata(self, application_id=0):
+        return self._send(GetMetadataCommand(application_id=application_id))
+
+    def get_psoc5_metadata(self, application_id=0):
+        return self._send(GetPSOC5MetadataCommand(application_id=application_id))
+
+    def program_row(self, array_id, row_id, rowdata, chunk_size):
+        chunked = [rowdata[i:i + chunk_size] for i in range(0, len(rowdata), chunk_size)]
+        for chunk in chunked[0:-1]:
+            self._send(SendDataCommand(chunk))
+        self._send(ProgramRowCommand(chunked[-1], array_id=array_id, row_id=row_id))
+
+    def get_row_checksum(self, array_id, row_id):
+        return self._send(VerifyRowCommand(array_id=array_id, row_id=row_id)).checksum
+
+    def set_application_active(self, application_id):
+        self._send(SetAppActive(application_id=application_id))
+
+    def _send(self, command, read=True):
+        """
+            Internal function that structures the data to be sent over the transport
+        """
+        data = command.data
+        packet = b"\x01" + struct.pack("<BH", command.COMMAND, len(data)) + data
+        packet = packet + struct.pack('<H', self.checksum_func(packet)) + b"\x17"
+        self.transport.send(packet)
+        if read:
+            response = self.transport.recv()
+            return command.RESPONSE.decode(response, self.checksum_func)
+        else:
+            return None
+
+    @staticmethod
+    def crc16_checksum(data):
+        crc = 0xffff
+
+        for b in data:
+            if not isinstance(b, int):
+                b = ord(b)
+            for i in range(8):
+                if (crc & 1) ^ (b & 1):
+                    crc = (crc >> 1) ^ 0x8408
+                else:
+                    crc >>= 1
+                b >>= 1
+
+        crc = (crc << 8) | (crc >> 8)
+        return ~crc & 0xffff
+
+    @staticmethod
+    def sum_2complement_checksum(data):
+        if type(data) is str:
+            return (1 + ~sum([ord(c) for c in data])) & 0xFFFF
+        elif type(data) in (bytearray, bytes):
+            return (1 + ~sum(data)) & 0xFFFF

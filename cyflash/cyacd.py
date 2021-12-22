@@ -1,6 +1,11 @@
+"""
+A Python module to handle .cyacd firmware file generated from PSOC Creator
+"""
 import codecs
 import six
 import struct
+import typing
+from enum import Enum
 
 hex_decoder = codecs.getdecoder('hex')
 
@@ -47,32 +52,69 @@ class BootloaderRow(object):
         return (1 + ~sum(self.data)) & 0xFF
 
 
+class ChecksumType(Enum):
+    sum_2complement = 0
+    crc16 = 1
+
+
 class BootloaderData(object):
+    """
+        The bootloader data object. This class is not to be directly created as an empty object, but
+        rather with the classmethod :func:`read`.
+
+        Examples:
+            data = cyacd.BootloaderData.read(firmware_file)
+    """
     def __init__(self):
-        self.silicon_id = None
-        self.silicon_rev = None
-        self.checksum_type = None
-        self.arrays = {}
-        self.total_rows = 0
+        self.silicon_id = None          # type: int
+        """The silicon ID of the firmware"""
+
+        self.silicon_rev = None         # type: int
+        """The silicon rev of the firmware"""
+
+        self.checksum_type = None       # type: ChecksumType
+        """The checksum type"""
+
+        self.arrays = {}                # type: dict
+        """The data array for the firmware's binary data"""
+
+        self.total_rows = 0             # type: int
+        """The total number of rows for the firmware's flash"""
 
     @classmethod
-    def read(cls, f):
-        if (six.PY2):
+    def read(cls, f: typing.TextIO):
+        """
+            The main invocation to create this class
+
+            Args:
+                f: The firmware's file object
+
+            Returns:
+                A :class:`BootloaderData` object containing the read firmware file's data and info
+
+            Raises:
+                UserWarning: If A) there is a Python 4 in the future, or B) The header of the firmware file is not of the
+                             correct length
+        """
+        if six.PY2:
             header = f.readline().strip().decode('hex')
-        elif (six.PY3):
+        elif six.PY3:
             # header is a bytes instance
             header = hex_decoder(f.readline().strip())[0]
+        else:
+            raise UserWarning("Unhandled future Python 4")
 
         if len(header) != 6:
             raise ValueError("Expected 12 byte header line first, firmware file may be corrupt.")
         self = cls()
         self.silicon_id, self.silicon_rev, self.checksum_type = struct.unpack('>LBB', header)
+        self.checksum_type = ChecksumType(self.checksum_type)
         for i, line in enumerate(f):
             row = BootloaderRow.read(line.strip(), i + 2)
             if row.array_id not in self.arrays:
                 self.arrays[row.array_id] = {}
             self.arrays[row.array_id][row.row_number] = row
-            self.total_rows += row.row_number;
+            self.total_rows += row.row_number
         return self
 
     def __str__(self):

@@ -1,330 +1,94 @@
-"""PSoC bootloader command line tool."""
+"""
+    The main bootloader class file
 
-import argparse
-import codecs
-import time
-import six
-import sys
+    This module is what contains the userspace bootloader host class
+"""
 
-from builtins import input
+import logging
+import typing
 
 import cyacd
 import protocol
 
 
-__version__ = "1.07"
+class BootloaderError(Exception):
+    pass
 
 
-def auto_int(x):
-    return int(x, 0)
+class BootloaderSiliconMismatch(Exception):
+    """
+    Exception when the device silicon and firmware silicon don't match.
 
-parser = argparse.ArgumentParser(description="Bootloader tool for Cypress PSoC devices")
-
-group = parser.add_mutually_exclusive_group(required=True)
-group.add_argument(
-    '--serial',
-    action='store',
-    dest='serial',
-    metavar='PORT',
-    default=None,
-    help="Use a serial interface")
-group.add_argument(
-    '--canbus',
-    action='store',
-    dest='canbus',
-    metavar='BUSTYPE',
-    default=None,
-    help="Use a CANbus interface (requires python-can)")
-
-parser.add_argument(
-    '--serial_baudrate',
-    action='store',
-    dest='serial_baudrate',
-    metavar='BAUD',
-    default=115200,
-    type=int,
-    help="Baud rate to use when flashing using serial (default 115200)")
-parser.add_argument(
-    '--parity',
-    action='store',
-    default='None',
-    type=str,
-    help="Desired parity (e.g. None, Even, Odd, Mark, or Space)")
-parser.add_argument(
-    '--stopbits',
-    action='store',
-    default='1',
-    type=str,
-    help="Desired stop bits (e.g. 1, 1.5, or 2)")
-parser.add_argument(
-    '--dtr',
-    action='store_true',
-    help="set DTR state true (default false)")
-parser.add_argument(
-    '--rts',
-    action='store_true',
-    help="set RTS state true (default false)")
-parser.add_argument(
-    '--canbus_baudrate',
-    action='store',
-    dest='canbus_baudrate',
-    metavar='BAUD',
-    default=125000,
-    type=int,
-    help="Baud rate to use when flashing using CANbus (default 125000)")
-parser.add_argument(
-    '--canbus_channel',
-    action='store',
-    dest='canbus_channel',
-    metavar='CANBUS_CHANNEL',
-    default=0,
-    help="CANbus channel to be used")
-parser.add_argument(
-    '--canbus_id',
-    action='store',
-    dest='canbus_id',
-    metavar='CANBUS_ID',
-    default=0,
-    type=auto_int,
-    help="CANbus frame ID to be used")
-
-group = parser.add_mutually_exclusive_group(required=False)
-group.add_argument(
-    '--canbus_echo',
-    action='store_true',
-    dest='canbus_echo',
-    default=False,
-    help="Use echoed back received CAN frames to keep the host in sync")
-group.add_argument(
-    '--canbus_wait',
-    action='store',
-    dest='canbus_wait',
-    metavar='CANBUS_WAIT',
-    default=5,
-    type=int,
-    help="Wait for CANBUS_WAIT ms amount of time after sending a frame if you're not using echo frames as a way to keep host in sync")
-
-parser.add_argument(
-    '--timeout',
-    action='store',
-    dest='timeout',
-    metavar='SECS',
-    default=5.0,
-    type=float,
-    help="Time to wait for a Bootloader response (default 5)")
-
-group = parser.add_mutually_exclusive_group()
-group.add_argument(
-    '--downgrade',
-    action='store_true',
-    dest='downgrade',
-    default=None,
-    help="Don't prompt before flashing old firmware over newer")
-group.add_argument(
-    '--nodowngrade',
-    action='store_false',
-    dest='downgrade',
-    default=None,
-    help="Fail instead of prompting when device firmware is newer")
-
-group = parser.add_mutually_exclusive_group()
-group.add_argument(
-    '--newapp',
-    action='store_true',
-    dest='newapp',
-    default=None,
-    help="Don't prompt before flashing an image with a different application ID")
-group.add_argument(
-    '--nonewapp',
-    action='store_false',
-    dest='newapp',
-    default=None,
-    help="Fail instead of flashing an image with a different application ID")
-
-parser.add_argument(
-    'logging_config',
-    action='store',
-    type=argparse.FileType(mode='r'),
-    nargs='?',
-    help="Python logging configuration file")
-
-parser.add_argument(
-    '--psoc5',
-    action='store_true',
-    dest='psoc5',
-    default=False,
-    help="Add tag to parse PSOC5 metadata")
-
-def validate_key(string):
-    if len(string) != 14:
-        raise argparse.ArgumentTypeError("key is of unexpected length")
-
-    try:
-        val = int(string, base=16)
-        key = []
-        key.append((val >> 40) & 0xff)
-        key.append((val >> 32) & 0xff)
-        key.append((val >> 24) & 0xff)
-        key.append((val >> 16) & 0xff)
-        key.append((val >> 8) & 0xff)
-        key.append(val & 0xff)
-        return key
-    except ValueError:
-        raise argparse.ArgumentTypeError("key is of unexpected format")
-
-parser.add_argument(
-    '--key',
-    action='store',
-    dest='key',
-    default=None,
-    type=validate_key,
-    help="Optional security key (six bytes, on the form 0xAABBCCDDEEFF)")
-
-DEFAULT_CHUNKSIZE = 25
-parser.add_argument(
-    '-cs',
-    '--chunk-size',
-    action='store',
-    dest='chunk_size',
-    default=DEFAULT_CHUNKSIZE,
-    type=int,
-    help="Chunk size to use for transfers - default %d" % DEFAULT_CHUNKSIZE)
-
-parser.add_argument(
-    '--dual-app',
-    action='store_true',
-    dest='dual_app',
-    default=False,
-    help="The bootloader is dual-application - will mark the newly flashed app as active")
-
-parser.add_argument(
-    '-v',
-    '--verbose',
-    action='store_true',
-    dest='verbose',
-    default=False,
-    help="Enable verbose debug output")
-
-parser.add_argument(
-    'image',
-    action='store',
-    type=argparse.FileType(mode='r'),
-    help="Image to read flash data from")
-
-checksum_types = {
-    0: protocol.sum_2complement_checksum,
-    1: protocol.crc16_checksum,
-}
-
-
-class BootloaderError(Exception): pass
-
-
-def make_session(args, checksum_type):
-    if args.serial:
-        import serial
-        ser = serial.Serial()
-        ser.port = args.serial
-        ser.baudrate = args.serial_baudrate
-        ser.parity = parity_convert(args.parity)
-        mapping = {"1": serial.STOPBITS_ONE,
-           "1.5": serial.STOPBITS_ONE_POINT_FIVE,
-           "2": serial.STOPBITS_TWO,
-           }
-        if not args.stopbits in mapping:
-            print('\nillegal argument', args.stopbits, 'for stopbit using ONE STOPBIT instead\n')
-        ser.stopbits = mapping.get(args.stopbits, serial.STOPBITS_ONE)
-        ser.timeout = args.timeout
-        ser.rts = args.dtr
-        ser.dtr = args.rts
-        ser.open()
-        ser.flushInput()  # need to clear any garbage off the serial port
-        ser.flushOutput()
-        transport = protocol.SerialTransport(ser, args.verbose)
-    elif args.canbus:
-        import can
-        # Remaining configuration options should follow python-can practices
-        canbus = can.interface.Bus(bustype=args.canbus, channel=args.canbus_channel, bitrate=args.canbus_baudrate)
-        # Wants timeout in ms, we have it in s
-        transport = protocol.CANbusTransport(canbus, args.canbus_id, int(args.timeout * 1000), args.canbus_echo,
-                                             args.canbus_wait)
-        transport.MESSAGE_CLASS = can.Message
-    else:
-        raise BootloaderError("No valid interface specified")
-
-    try:
-        checksum_func = checksum_types[checksum_type]
-    except KeyError:
-        raise BootloaderError("Invalid checksum type: %d" % (checksum_type,))
-
-    return protocol.BootloaderSession(transport, checksum_func)
-
-
-def seek_permission(argument, message):
-    if argument is not None:
-        return lambda remote, local: argument
-    else:
-        def prompt(*args):
-            while True:
-                result = input(message % args)
-                if result.lower().startswith('y'):
-                    return True
-                elif result.lower().startswith('n'):
-                    return False
-        return prompt
+    The variable `what_is_mismatched` of this exception indicates what was mismatched: `rev` for the silicon revision
+                or `id` for the silicon ID.
+    """
+    def __init__(self, what_is_mismatched):
+        self.what_is_mismatched = what_is_mismatched
 
 
 class BootloaderHost(object):
-    def __init__(self, session, args, out):
-        self.session = session
-        self.key = args.key
-        self.chunk_size = args.chunk_size
-        self.dual_app = args.dual_app
-        self.out = out
+    def __init__(self, transport: typing.Union[protocol.SerialTransport, protocol.CANbusTransport], data: cyacd.BootloaderData,
+                 chunck_size: int = 25, key: list = None, is_dual_app: bool = False):
+        """
+        Args:
+            transport: The transport to send the data over. Right now only SerialTransport and CANbusTransport are
+                       supported
+            data: The firmware to upload as a :class:`BootloaderData` class.
+            key: The bootloader's secret key if applicable. Defaults to None
+            chunck_size: The size of a each transfer chuck. Defaults to 25
+            is_dual_app: Whether the bootloader is a dual application. Defaults to False
+        """
+        self._log = logging.getLogger('Bootloader Host')
+        self.transport = transport
+        self.key = key
+        self.data = data
+        self.session = protocol.BootloaderSession(self.transport, self.data.checksum_type)
+        self.chunk_size = chunck_size
+        self.dual_app = is_dual_app
         self.row_ranges = {}
 
-    def bootload(self, data, downgrade, newapp, psoc5):
-        self.out.write("Entering bootload.\n")
-        self.enter_bootloader(data)
-        if self.dual_app:
-            self.out.write("Getting application status.\n")
-            app_area_to_flash = self.application_status()
-        self.out.write("Verifying row ranges.\n")
-        self.verify_row_ranges(data)
-        self.out.write("Checking metadata.\n")
-        self.check_metadata(data, downgrade, newapp, psoc5)
-        self.out.write("Starting flash operation.\n")
-        self.write_rows(data)
-        if not self.session.verify_checksum():
-            raise BootloaderError("Flash checksum does not verify! Aborting.")
-        else:
-            self.out.write("Device checksum verifies OK.\n")
-        if self.dual_app:
-            self.set_application_active(app_area_to_flash)
-        self.out.write("Rebooting device.\n")
-        self.session.exit_bootloader()
+    # def bootload(self, downgrade, newapp, psoc5):
+    #     self._log.info("Entering bootload.\n")
+    #     self.enter_bootloader()
+    #     if self.dual_app:
+    #         self._log.info("Getting application status.\n")
+    #         app_area_to_flash = self.application_status()
+    #     self._log.info("Verifying row ranges.\n")
+    #     self.verify_row_ranges()
+    #     self._log.info("Checking metadata.\n")
+    #     self.check_metadata(downgrade, newapp, psoc5)
+    #     self._log.info("Starting flash operation.\n")
+    #     self.write_rows()
+    #     if not self.session.verify_checksum():
+    #         raise BootloaderError("Flash checksum does not verify! Aborting.")
+    #     else:
+    #         self._log.info("Device checksum verifies OK.\n")
+    #     if self.dual_app:
+    #         self.set_application_active(app_area_to_flash)
+    #     self._log.info("Rebooting device.\n")
+    #     self.session.exit_bootloader()
 
     def set_application_active(self, application_id):
-        self.out.write("Setting application %d as active.\n" % application_id)
+        self._log.info("Setting application %d as active.\n" % application_id)
         self.session.set_application_active(application_id)
 
     def application_status(self):
         to_flash = None
         for app in [0, 1]:
             app_valid, app_active = self.session.application_status(app)
-            self.out.write("App %d: valid: %s, active: %s\n" % (app, app_valid, app_active))
+            self._log.debug("App %d: valid: %s, active: %s\n" % (app, app_valid, app_active))
             if app_active == 0:
                 to_flash = app
 
         if to_flash is None:
             raise BootloaderError("Failed to find inactive app to flash. Aborting.")
-        self.out.write("Will flash app %d.\n" % to_flash)
+        self._log.debug("Will flash app %d.\n" % to_flash)
         return to_flash
 
-    def verify_row_ranges(self, data):
-        for array_id, array in six.iteritems(data.arrays):
+    def verify_row_ranges(self):
+        for array_id, array in self.data.arrays.items():
             start_row, end_row = self.session.get_flash_size(array_id)
-            self.out.write("Array %d: first row %d, last row %d.\n" % (
+            self._log.debug("Array %d: first row %d, last row %d.\n" % (
                 array_id, start_row, end_row))
             self.row_ranges[array_id] = (start_row, end_row)
             for row_number in array:
@@ -333,37 +97,44 @@ class BootloaderHost(object):
                         "Row %d in array %d out of range. Aborting."
                         % (row_number, array_id))
 
-    def enter_bootloader(self, data):
-        self.out.write("Initialising bootloader.\n")
-        silicon_id, silicon_rev, bootloader_version = self.session.enter_bootloader(self.key)
-        self.out.write("Silicon ID 0x%.8x, revision %d.\n" % (silicon_id, silicon_rev))
-        if silicon_id != data.silicon_id:
-            raise ValueError("Silicon ID of device (0x%.8x) does not match firmware file (0x%.8x)"
-                             % (silicon_id, data.silicon_id))
-        if silicon_rev != data.silicon_rev:
-            raise ValueError("Silicon revision of device (0x%.2x) does not match firmware file (0x%.2x)"
-                             % (silicon_rev, data.silicon_rev))
+    def enter_bootloader(self):
+        """
+        Enters bootloader mode
+        Raises:
 
-    def check_metadata(self, data, downgrade, newapp, psoc5):
+        """
+        self._log.info("Initialising bootloader.\n")
+        silicon_id, silicon_rev, bootloader_version = self.session.enter_bootloader(self.key)
+        self._log.info("Silicon ID 0x%.8x, revision %d.\n" % (silicon_id, silicon_rev))
+        if silicon_id != self.data.silicon_id:
+            self._log.error("Silicon ID of device (0x%.8x) does not match firmware file (0x%.8x)"
+                            % (silicon_id, self.data.silicon_id))
+            raise BootloaderSiliconMismatch('id')
+        if silicon_rev != self.data.silicon_rev:
+            self._log.error("Silicon revision of device (0x%.2x) does not match firmware file (0x%.2x)"
+                            % (silicon_rev, self.data.silicon_rev))
+            raise BootloaderSiliconMismatch('rev')
+
+    def check_metadata(self, downgrade, newapp, psoc5):
         try:
             if psoc5:
                 metadata = self.session.get_psoc5_metadata(0)
             else:
                 metadata = self.session.get_metadata(0)
-            self.out.write("Device application_id %d, version %d.\n" % (
+            self._log.debug("Device application_id %d, version %d.\n" % (
                 metadata.app_id, metadata.app_version))
         except protocol.InvalidApp:
-            self.out.write("No valid application on device.\n")
+            self._log.warning("No valid application on device.\n")
             return
         except protocol.BootloaderError as e:
-            self.out.write("Cannot read metadata from device: {}\n".format(e))
+            self._log.warning("Cannot read metadata from device: {}\n".format(e))
             return
 
         # TODO: Make this less horribly hacky
         # Fetch from last row of last flash array
-        metadata_row = data.arrays[max(data.arrays.keys())][self.row_ranges[max(data.arrays.keys())][1]]
+        metadata_row = self.data.arrays[max(self.data.arrays.keys())][self.row_ranges[max(self.data.arrays.keys())][1]]
         if psoc5:
-            local_metadata = protocol.GetPSOC5MetadataResponse(metadata_row.data[192:192+56])
+            local_metadata = protocol.GetPSOC5MetadataResponse(metadata_row.data[192:192 + 56])
         else:
             local_metadata = protocol.GetMetadataResponse(metadata_row.data[64:120])
 
@@ -380,10 +151,10 @@ class BootloaderHost(object):
             if not newapp(metadata.app_id, local_metadata.app_id):
                 raise ValueError(message + " Aborting.")
 
-    def write_rows(self, data):
-        total = sum(len(x) for x in data.arrays.values())
+    def write_rows(self):
+        total = sum(len(x) for x in self.data.arrays.values())
         i = 0
-        for array_id, array in six.iteritems(data.arrays):
+        for array_id, array in self.data.arrays.items():
             for row_number, row in array.items():
                 i += 1
                 self.session.program_row(array_id, row_number, row.data, self.chunk_size)
@@ -397,60 +168,6 @@ class BootloaderHost(object):
 
     def progress(self, message=None, current=None, total=None):
         if not message:
-            self.out.write("\n")
+            self._log.debug("\n")
         else:
-            self.out.write("\r%s (%d/%d)" % (message, current, total))
-        self.out.flush()
-
-def parity_convert(value):
-    import serial
-    if value.lower() in ("none", "n"):
-        parity = serial.PARITY_NONE
-    elif value.lower() in ("even", "e"):
-        parity = serial.PARITY_EVEN
-    elif value.lower() in ("odd", "o"):
-        parity = serial.PARITY_ODD
-    else:
-        parity = serial.PARITY_NONE
-        print('\nillegal argument', value, 'for parity using', parity, 'instead\n')
-
-    return parity
-
-def main():
-    args = parser.parse_args()
-
-    if (args.logging_config):
-        import logging
-        import logging.config
-        logging.config.fileConfig(args.logging_config)
-
-    if (six.PY3):
-        t0 = time.perf_counter()
-    else:
-        t0 = time.clock()
-    data = cyacd.BootloaderData.read(args.image)
-    session = make_session(args, data.checksum_type)
-    bl = BootloaderHost(session, args, sys.stdout)
-    try:
-        bl.bootload(
-            data,
-            seek_permission(
-                args.downgrade,
-                "Device version %d is greater than local version %d. Flash anyway? (Y/N)"),
-            seek_permission(
-                args.newapp,
-                "Device app ID %d is different from local app ID %d. Flash anyway? (Y/N)"),
-            args.psoc5)
-    except (protocol.BootloaderError, BootloaderError) as e:
-        print("Unhandled error: {}".format(e))
-        return 1
-    if (six.PY3):
-        t1 = time.perf_counter()
-    else:
-        t1 = time.clock()
-    print("Total running time {0:02.2f}s".format(t1 - t0))
-    return 0
-
-
-if __name__ == '__main__':
-    sys.exit(main())
+            self._log.debug("\r%s (%d/%d)" % (message, current, total))
