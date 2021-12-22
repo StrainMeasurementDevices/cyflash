@@ -1,3 +1,3 @@
-from . import bootload
-from . import cyacd
-from . import protocol
+import bootload
+import cyacd
+import protocol

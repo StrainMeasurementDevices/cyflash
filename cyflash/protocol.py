@@ -369,11 +369,18 @@ class GetPSOC5MetadataCommand(BootloaderCommand):
 
 
 class BootloaderSession(object):
+    """
+      The main bootloader session object
+    """
+
     def __init__(self, transport, checksum_func):
         self.transport = transport
         self.checksum_func = checksum_func
 
     def send(self, command, read=True):
+        """
+            Internal function that structures the data to be sent over the transport
+        """
         data = command.data
         packet = b"\x01" + struct.pack("<BH", command.COMMAND, len(data)) + data
         packet = packet + struct.pack('<H', self.checksum_func(packet)) + b"\x17"
@@ -384,7 +391,19 @@ class BootloaderSession(object):
         else:
             return None
 
-    def enter_bootloader(self, key):
+    def enter_bootloader(self, key: list = None):
+        """
+            Enters the bootloader
+
+            Args:
+                key (int, optional): The secret key for the bootloader, as a list of 6 hex codes.
+
+            Returns:
+                A tuple of:
+                  - The silicon ID
+                  - The silicon rev
+                  - The bootloader rev
+        """
         response = self.send(EnterBootloaderCommand(key))
         return response.silicon_id, response.silicon_rev, response.bl_version | (response.bl_version_2 << 16)
 
