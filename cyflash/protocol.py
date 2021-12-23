@@ -4,7 +4,7 @@ from builtins import super
 from builtins import range
 import struct
 import time
-from cyacd import ChecksumType
+from cyflash.cyacd import ChecksumType
 
 
 class InvalidPacketError(Exception):
@@ -511,6 +511,7 @@ class BootloaderSession(object):
                 checksum_type: The checksum type read from the firmware file (see :class:`cyacd.BootloaderData` for more
                                details
         """
+        self._log = logging.getLogger('BootloaderSession')
         self.transport = transport
         if checksum_type == ChecksumType.crc16:
             self.checksum_func = self.crc16_checksum
@@ -532,6 +533,7 @@ class BootloaderSession(object):
                   - The silicon rev
                   - The bootloader rev
         """
+        self._log.debug('Entering bootloader')
         response = self._send(EnterBootloaderCommand(key))
         return response.silicon_id, response.silicon_rev, response.bl_version | (response.bl_version_2 << 16)
 

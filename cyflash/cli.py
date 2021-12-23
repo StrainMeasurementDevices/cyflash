@@ -15,9 +15,9 @@ import logging.config
 
 from builtins import input
 
-import bootload
-import protocol
-import cyacd
+from cyflash import bootload
+from cyflash import protocol
+from cyflash import cyacd
 
 
 def auto_int(x):
