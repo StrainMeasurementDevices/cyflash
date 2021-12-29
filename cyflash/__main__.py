@@ -1,3 +1,3 @@
-from cyflash import cli
+import cli
 
 cli.main()

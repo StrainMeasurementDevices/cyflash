@@ -15,9 +15,9 @@ import logging.config
 
 from builtins import input
 
-from cyflash import bootload
-from cyflash import protocol
-from cyflash import cyacd
+import bootload
+import protocol
+import cyacd
 
 
 def auto_int(x):
@@ -224,7 +224,7 @@ class BootloaderError(Exception):
     pass
 
 
-def make_session(args, checksum_type):
+def get_transport(args):
     if args.serial:
         import serial
         ser = serial.Serial()
@@ -256,7 +256,7 @@ def make_session(args, checksum_type):
     else:
         raise BootloaderError("No valid interface specified")
 
-    return protocol.BootloaderSession(transport, checksum_type)
+    return transport
 
 
 def seek_permission(argument, message):
@@ -291,6 +291,7 @@ def parity_convert(value):
 
 def main():
     logging.basicConfig(level=logging.DEBUG)
+    logging.getLogger('cyflash-serial-transport').setLevel(logging.INFO)
     args = parser.parse_args()
 
     if args.logging_config:
@@ -301,20 +302,37 @@ def main():
     else:
         t0 = time.clock()
     data = cyacd.BootloaderData.read(args.image)
-    session = make_session(args, data.checksum_type)
-    bl = bootload.BootloaderHost(session, args)
+    transport = get_transport(args)
+    session = bootload.BootloaderHost(transport, data, key=args.key)
     try:
-        bl.bootload(
-            data,
-            seek_permission(
-                args.downgrade,
-                "Device version %d is greater than local version %d. Flash anyway? (Y/N)"),
-            seek_permission(
-                args.newapp,
-                "Device app ID %d is different from local app ID %d. Flash anyway? (Y/N)"),
-            args.psoc5)
+        session.enter_bootloader()
+        # Verify that the firmware's rows
+        try:
+            session.verify_row_ranges()
+        except bootload.BootloaderHostError:
+            raise UserWarning("Firmware is invalid")
+        # Check the app ID and app version metadata vs what's already on the board
+        try:
+            err = session.check_metadata()
+            if len(err) != 0:
+                msg = "Metadata Exception:"
+                for e in err:
+                    if isinstance(e, session.MetadataAppVersionError):
+                        msg += 'App Version'
+                    elif isinstance(e, session.MetadataIDError):
+                        msg += 'App ID'
+                raise UserWarning(msg)
+        except protocol.BootloaderError:
+            print("Error in bootloader, passing for now")
+            pass
+        # Write the data rows
+        session.write_rows()
+        # Verifies the application checksum and that everything went thru just fine
+        session.verify_checksum()
+        # Exit the bootloader
+        session.exit_bootloader()
     except (protocol.BootloaderError, BootloaderError) as e:
-        print("Unhandled error: {}".format(e))
+        print("Unhandled error: {}".format(e.STATUS))
         return 1
     if (six.PY3):
         t1 = time.perf_counter()

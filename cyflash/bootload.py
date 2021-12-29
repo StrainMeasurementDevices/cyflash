@@ -8,8 +8,8 @@ import logging
 import typing
 from enum import Enum
 from dataclasses import dataclass
-from cyflash import cyacd
-from cyflash import protocol
+import cyacd
+import protocol
 
 
 class BootloaderSiliconMismatch(Exception):
