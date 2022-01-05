@@ -4,7 +4,8 @@ from builtins import super
 from builtins import range
 import struct
 import time
-from cyacd import ChecksumType
+
+from cyflash.cyacd import ChecksumType
 
 
 class InvalidPacketError(Exception):

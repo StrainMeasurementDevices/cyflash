@@ -8,8 +8,10 @@ import logging
 import typing
 from enum import Enum
 from dataclasses import dataclass
-import cyacd
-import protocol
+from collections.abc import Callable
+
+from cyflash import cyacd
+from cyflash import protocol
 
 
 class BootloaderSiliconMismatch(Exception):
@@ -205,7 +207,17 @@ class BootloaderHost(object):
 
         return err_ret
 
-    def write_rows(self):
+    def write_rows(self, progress_def: Callable[[str, int, int], None] = None):
+        """
+        Writes the firmware rows to the device
+
+        Args:
+            progress_def: Optional callback that will be called per row to update the user application.
+                          The callback must take 3 arguments, a string with a message, an integer with the
+                          current row, and an integer with the total rows
+        """
+        if progress_def is None:
+            progress_def = self.progress
         total = sum(len(x) for x in self.data.arrays.values())
         i = 0
         for array_id, array in self.data.arrays.items():
