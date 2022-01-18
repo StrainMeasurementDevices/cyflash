@@ -37,6 +37,10 @@ and --newapp and --nonewapp, respectively.
 Cyflash is still quite new, and should be considered beta-quality software.
 Pull requests and bug reports are most welcome.
 
+Docs
+=======
+The documentation for this package can be built with `make docs` in the *docs* folder
+
 
 Cypress Bootloader metadata component bug
 =========================================

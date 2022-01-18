@@ -88,7 +88,7 @@ class BootloaderHost(object):
         """
         if not self.dual_app:
             raise UserWarning("Command only valid for dual application")
-        self._log.info("Setting application %d as active.\n" % application_id)
+        self._log.info("Setting application %d as active." % application_id)
         self.session.set_application_active(application_id)
 
     def get_application_inactive(self):
@@ -104,7 +104,7 @@ class BootloaderHost(object):
         to_flash = None
         for app in [0, 1]:
             app_valid, app_active = self.session.application_status(app)
-            self._log.debug("App %d: valid: %s, active: %s\n" % (app, app_valid, app_active))
+            self._log.debug("App %d: valid: %s, active: %s" % (app, app_valid, app_active))
             if app_active == 0:
                 to_flash = app
 
@@ -122,7 +122,7 @@ class BootloaderHost(object):
         """
         for array_id, array in self.data.arrays.items():
             start_row, end_row = self.session.get_flash_size(array_id)
-            self._log.debug("Array %d: first row %d, last row %d.\n" % (
+            self._log.debug("Array %d: first row %d, last row %d." % (
                 array_id, start_row, end_row))
             self.row_ranges[array_id] = (start_row, end_row)
             for row_number in array:
@@ -130,6 +130,18 @@ class BootloaderHost(object):
                     err = "Row %d in array %d out of range. Aborting." % (row_number, array_id)
                     self._log.error(err)
                     raise BootloaderHostError(err)
+
+    def erase_all_rows(self, array_id):
+        """
+        Erases all flash rows for a given flash array
+
+        Args:
+            array_id: The flash array ID to erase (see your PSOC's reference manual for all available flash arrays)
+        """
+        start_row, end_row = self.session.get_flash_size(array_id)
+        for row_id in range(start_row, end_row):
+            self.session.erase_row(array_id, row_id)
+            self._log.debug(f"Erased row {row_id}")
 
     def enter_bootloader(self):
         """
@@ -139,9 +151,9 @@ class BootloaderHost(object):
             BootloaderSiliconMismatch: If there is a mismatch between the chip's and the firmware's silicon ID and
                                        silicon rev
         """
-        self._log.info("Initialising bootloader.\n")
+        self._log.info("Initialising bootloader.")
         silicon_id, silicon_rev, bootloader_version = self.session.enter_bootloader(self.key)
-        self._log.info("Silicon ID 0x%.8x, revision %d.\n" % (silicon_id, silicon_rev))
+        self._log.info("Silicon ID 0x%.8x, revision %d." % (silicon_id, silicon_rev))
         if silicon_id != self.data.silicon_id:
             self._log.error("Silicon ID of device (0x%.8x) does not match firmware file (0x%.8x)"
                             % (silicon_id, self.data.silicon_id))
@@ -179,7 +191,7 @@ class BootloaderHost(object):
             metadata = self.session.get_psoc5_metadata(0)
         else:
             metadata = self.session.get_metadata(0)
-        self._log.debug("Device application_id %d, version %d.\n" % (
+        self._log.debug("Device application_id %d, version %d." % (
             metadata.app_id, metadata.app_version))
 
         # TODO: Make this less horribly hacky
@@ -217,8 +229,9 @@ class BootloaderHost(object):
                           current row, and an integer with the total rows
         """
         if progress_def is None:
-            progress_def = self.progress
+            progress_def = self._progress
         total = sum(len(x) for x in self.data.arrays.values())
+        progress_def("Total Rows and Array", 0, total)
         i = 0
         for array_id, array in self.data.arrays.items():
             for row_number, row in array.items():
@@ -230,10 +243,12 @@ class BootloaderHost(object):
                             array_id, row_number, row.checksum, actual_checksum)
                     self._log.error(err)
                     raise BootloaderHostError(err)
-                self.progress("Uploading data", i, total)
-            self.progress()
+                progress_def("Uploading data", i, total)
 
-    def progress(self, message=None, current=None, total=None):
+    def _progress(self, message=None, current=None, total=None):
+        """
+            Internal progress function, if :func:`write_rows`'s `progress_def` input is None
+        """
         if not message:
             self._log.debug("\n")
         else:

@@ -567,6 +567,9 @@ class BootloaderSession(object):
             self._send(SendDataCommand(chunk))
         self._send(ProgramRowCommand(chunked[-1], array_id=array_id, row_id=row_id))
 
+    def erase_row(self, array_id, row_id):
+        self._send(EraseRowCommand(array_id=array_id, row_id=row_id))
+
     def get_row_checksum(self, array_id, row_id):
         return self._send(VerifyRowCommand(array_id=array_id, row_id=row_id)).checksum
 
